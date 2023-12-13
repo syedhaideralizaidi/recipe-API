@@ -1,9 +1,12 @@
 """
 Test for recipe APIs
 """
-import json
-
 from django.test import TestCase
+
+import tempfile
+import os
+from PIL import Image
+
 from rest_framework.test import APIClient
 from rest_framework import status
 from core.models import Recipe, Tag
@@ -15,6 +18,11 @@ from django.contrib.auth import get_user_model
 User = get_user_model()
 
 RECIPES_URL = reverse("recipe:recipe-list")
+
+
+def image_upload_url(recipe_id):
+    """Create and return image upload URL"""
+    return reverse("recipe:recipe-upload-image", args=[recipe_id])
 
 
 def create_recipe(user, **params):
@@ -189,3 +197,70 @@ class PrivateRecipeAPITests(TestCase):
         for tag in payload["tags"]:
             exists = recipe.tags.filter(name=tag["name"], user=self.user).exists()
             self.assertTrue(exists)
+
+    def test_create_tag_on_update(self):
+        """Test creating a tag while updating a recipe"""
+        recipe = create_recipe(user=self.user)
+        payload = {"tags": [{"name": "Lunch"}]}
+        url = detail_url(recipe.id)
+        res = self.client.patch(url, payload, format="json")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        new_tag = Tag.objects.create(user=self.user, name="Lunch")
+        self.assertIn(new_tag.name, recipe.tags.all().values_list("name", flat=True))
+
+    # def test_update_recipe_assign_tag(self):
+    #     """Test assigning an existing tag when updating a recipe"""
+    #     tag_breakfast = Tag.objects.create(user=self.user, name="Breakfast")
+    #     recipe = create_recipe(user=self.user)
+    #     recipe.tags.add(tag_breakfast)
+    #
+    #     tag_lunch = Tag.objects.create(user=self.user, name="Lunch")
+    #     payload = {"tags": [{"name": "Lunch"}]}
+    #     url = detail_url(recipe.id)
+    #     res = self.client.patch(url, payload)
+    #     self.assertEqual(res.status_code, status.HTTP_200_OK)
+    #     self.assertIn(tag_lunch, recipe.tags.all())
+    #     self.assertNotIn(tag_breakfast, recipe.tags.all())
+
+    def test_filter_recipes_by_tags(self):
+        """Test filtering recipes by tags"""
+        recipe1 = create_recipe(user=self.user, title='Thai Chocolate')
+        recipe2 = create_recipe(user=self.user, title='French Chocolate')
+        tag1 = Tag.objects.create(user=self.user, name='Vegan')
+        tag2 = Tag.objects.create(user=self.user, name='Vegetarian')
+        recipe1.tags.add(tag1)
+        recipe2.tags.add(tag2)
+        recipe3 = create_recipe(user=self.user, title='Fish and chips')
+        params = {"tags": f'{tag1.id}, {tag2.id}'}
+        res = self.client.get(RECIPES_URL, params)
+        serializer1 = RecipeSerializer(recipe1)
+        serializer2 = RecipeSerializer(recipe2)
+        serializer3 = RecipeSerializer(recipe3)
+        self.assertIn(serializer1.data, res.data)
+        self.assertIn(serializer2.data, res.data)
+        self.assertNotIn(serializer3.data, res.data)
+class ImageUploadTests(TestCase):
+    """Tests for uploading images API"""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user("user@example.com", "password123")
+        self.client.force_authenticate(self.user)
+        self.recipe = create_recipe(user=self.user)
+
+    def tearDown(self):
+        self.recipe.image.delete()
+
+    def test_upload_image(self):
+        """Test uploading an image to a recipe"""
+        url = image_upload_url(self.recipe.id)
+        with tempfile.NamedTemporaryFile(suffix=".jpg") as image_file:
+            img = Image.new("RGB", (10, 10))
+            img.save(image_file, format="JPEG")
+            image_file.seek(0)
+            payload = {"image": image_file}
+            res = self.client.post(url, payload, format="multipart")
+        self.recipe.refresh_from_db()
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIn("image", res.data)
+        self.assertTrue(os.path.exists(self.recipe.image.path))
